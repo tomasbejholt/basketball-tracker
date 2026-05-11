@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.env
+models/*.pt
+!models/best.pt
+models/*.pth

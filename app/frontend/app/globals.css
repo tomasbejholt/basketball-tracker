@@ -1,0 +1,35 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  background-color: #090909;
+  color: white;
+
+  /* To add your own court background: place court-bg.jpg in /public/ and uncomment below */
+  /* background-image: url('/court-bg.jpg'); */
+  /* background-size: cover; */
+  /* background-position: center; */
+  /* background-attachment: fixed; */
+}
+
+/* Subtle orange glow in background corners */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  background:
+    radial-gradient(ellipse at 10% 60%, rgba(249, 115, 22, 0.06) 0%, transparent 55%),
+    radial-gradient(ellipse at 90% 15%, rgba(249, 115, 22, 0.05) 0%, transparent 55%);
+  pointer-events: none;
+  z-index: 0;
+}
+
+input[type="range"] {
+  accent-color: #f97316;
+  cursor: pointer;
+}
+
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-track { background: #111; }
+::-webkit-scrollbar-thumb { background: #f97316; border-radius: 2px; }
