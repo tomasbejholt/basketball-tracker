@@ -103,6 +103,7 @@ export default function TrackerPage() {
   };
 
   const startTracking = async () => {
+    if (!file) return;
     setShowColorModal(false);
     setHasPickedColor(true);
     setProcessing(true);
