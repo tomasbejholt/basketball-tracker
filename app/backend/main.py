@@ -18,6 +18,16 @@ app.add_middleware(
 )
 
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "models", "best.pt")
+
+
+@app.on_event("startup")
+def cleanup_temp():
+    import glob
+    for f in glob.glob(os.path.join(tempfile.gettempdir(), "bt_*")):
+        try:
+            os.unlink(f)
+        except OSError:
+            pass
 _model: YOLO | None = None
 
 _progress: dict[str, dict] = {}
@@ -262,7 +272,13 @@ async def track(
             check=True, capture_output=True,
         )
 
-    await asyncio.to_thread(_render_and_encode)
+    try:
+        await asyncio.to_thread(_render_and_encode)
+    except Exception:
+        _remove(working_path)
+        _remove(avi_path)
+        _remove(mp4_path)
+        raise
 
     if job_id and job_id in _progress:
         del _progress[job_id]
