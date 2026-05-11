@@ -338,7 +338,7 @@ export default function TrackerPage() {
         <div className="text-gray-500 text-sm mt-2">
           {file
             ? `${(file.size / 1024 / 1024).toFixed(1)} MB · Click to change`
-            : "or click to browse — MP4, MOV, AVI"}
+            : "or click to browse — MP4 and MOV supported · AV1/WebM not supported"}
         </div>
       </div>
 

@@ -4,7 +4,7 @@ import { useRouter } from "next/navigation";
 import { useState } from "react";
 
 const VIDEOS = [
-  { label: "Game Clip 1", src: "/video_1.webm" },
+  { label: "Game Clip 1", src: "/video_1.mp4" },
   { label: "Game Clip 2", src: "/video_2.mp4" },
   { label: "Game Clip 3", src: "/video_3.mp4" },
 ];
