@@ -138,33 +138,37 @@ def _smooth(positions: list, window: int = 5) -> list:
 
 def _run_inference(model: YOLO, input_path: str, conf: float, job_id: str) -> tuple[list, list]:
     import torch
-    vid_stride = 2
-    strided_positions: list = []
-    strided_boxes: list = []
+    raw_positions: list = []
+    raw_boxes: list = []
     with torch.no_grad():
-        for i, result in enumerate(
-            model.track(source=input_path, persist=True, conf=conf, verbose=False, stream=True, imgsz=640, vid_stride=vid_stride)
+        for frame_idx, result in enumerate(
+            model.track(source=input_path, persist=True, conf=conf, verbose=False, stream=True, imgsz=640)
         ):
             if job_id and job_id in _progress:
-                _progress[job_id]["frame"] = i * vid_stride
+                _progress[job_id]["frame"] = frame_idx
             boxes = result.boxes
             if boxes is not None and len(boxes) > 0:
                 best = boxes[boxes.conf.argmax()]
                 x1, y1, x2, y2 = best.xyxy[0].cpu().numpy().astype(int)
-                strided_positions.append(((x1 + x2) // 2, (y1 + y2) // 2))
-                strided_boxes.append((x1, y1, x2, y2, float(best.conf)))
+                raw_positions.append(((x1 + x2) // 2, (y1 + y2) // 2))
+                raw_boxes.append((x1, y1, x2, y2, float(best.conf)))
             else:
-                strided_positions.append(None)
-                strided_boxes.append(None)
-    # Expand strided results back to per-frame lists; interpolation fills the gaps
-    raw_positions: list = []
-    raw_boxes: list = []
-    for pos, box in zip(strided_positions, strided_boxes):
-        raw_positions.append(pos)
-        raw_positions.append(None)
-        raw_boxes.append(box)
-        raw_boxes.append(None)
+                raw_positions.append(None)
+                raw_boxes.append(None)
     return raw_positions, raw_boxes
+
+
+def _is_h264_yuv420p(path: str) -> bool:
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-select_streams", "v:0",
+             "-show_entries", "stream=codec_name,pix_fmt",
+             "-of", "default=noprint_wrappers=1", path],
+            capture_output=True, text=True, timeout=10,
+        )
+        return "codec_name=h264" in r.stdout and "pix_fmt=yuv420p" in r.stdout
+    except Exception:
+        return False
 
 
 def _process_video(
@@ -181,16 +185,20 @@ def _process_video(
     t0 = _time.time()
     working_path = input_path
     try:
-        try:
-            subprocess.run(
-                ["ffmpeg", "-y", "-i", input_path, "-vcodec", "libx264", "-pix_fmt", "yuv420p", conv_path],
-                check=True, capture_output=True,
-            )
-            _remove(input_path)
-            working_path = conv_path
-        except Exception:
-            _remove(conv_path)
-        print(f"[timing] pre-convert: {_time.time()-t0:.1f}s", flush=True)
+        already_h264 = _is_h264_yuv420p(input_path)
+        if already_h264:
+            print(f"[timing] pre-convert: skipped (already H.264)", flush=True)
+        else:
+            try:
+                subprocess.run(
+                    ["ffmpeg", "-y", "-i", input_path, "-vcodec", "libx264", "-pix_fmt", "yuv420p", conv_path],
+                    check=True, capture_output=True,
+                )
+                _remove(input_path)
+                working_path = conv_path
+            except Exception:
+                _remove(conv_path)
+            print(f"[timing] pre-convert: {_time.time()-t0:.1f}s", flush=True)
 
         cap = cv2.VideoCapture(working_path)
         fps = cap.get(cv2.CAP_PROP_FPS) or 30
