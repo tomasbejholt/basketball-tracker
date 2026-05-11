@@ -185,6 +185,18 @@ def _process_video(
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
         cap.release()
 
+        if total_frames == 0:
+            r = subprocess.run(
+                ["ffprobe", "-v", "quiet", "-select_streams", "v:0",
+                 "-show_entries", "stream=nb_frames",
+                 "-of", "default=noprint_wrappers=1:nokey=1", working_path],
+                capture_output=True, text=True,
+            )
+            try:
+                total_frames = int(r.stdout.strip())
+            except (ValueError, TypeError):
+                pass
+
         if w == 0 or h == 0:
             raise RuntimeError("Could not decode video. Please use MP4 (H.264) format.")
 
