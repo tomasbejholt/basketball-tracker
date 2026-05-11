@@ -137,22 +137,24 @@ def _smooth(positions: list, window: int = 5) -> list:
 
 
 def _run_inference(model: YOLO, input_path: str, conf: float, job_id: str) -> tuple[list, list]:
+    import torch
     raw_positions: list = []
     raw_boxes: list = []
-    for frame_idx, result in enumerate(
-        model.track(source=input_path, persist=True, conf=conf, verbose=False, stream=True)
-    ):
-        if job_id and job_id in _progress:
-            _progress[job_id]["frame"] = frame_idx
-        boxes = result.boxes
-        if boxes is not None and len(boxes) > 0:
-            best = boxes[boxes.conf.argmax()]
-            x1, y1, x2, y2 = best.xyxy[0].cpu().numpy().astype(int)
-            raw_positions.append(((x1 + x2) // 2, (y1 + y2) // 2))
-            raw_boxes.append((x1, y1, x2, y2, float(best.conf)))
-        else:
-            raw_positions.append(None)
-            raw_boxes.append(None)
+    with torch.no_grad():
+        for frame_idx, result in enumerate(
+            model.track(source=input_path, persist=True, conf=conf, verbose=False, stream=True, imgsz=320)
+        ):
+            if job_id and job_id in _progress:
+                _progress[job_id]["frame"] = frame_idx
+            boxes = result.boxes
+            if boxes is not None and len(boxes) > 0:
+                best = boxes[boxes.conf.argmax()]
+                x1, y1, x2, y2 = best.xyxy[0].cpu().numpy().astype(int)
+                raw_positions.append(((x1 + x2) // 2, (y1 + y2) // 2))
+                raw_boxes.append((x1, y1, x2, y2, float(best.conf)))
+            else:
+                raw_positions.append(None)
+                raw_boxes.append(None)
     return raw_positions, raw_boxes
 
 
@@ -249,7 +251,7 @@ def _process_video(
                 "-f", "rawvideo", "-vcodec", "rawvideo",
                 "-s", f"{w}x{h}", "-pix_fmt", "bgr24", "-r", str(int(fps)),
                 "-i", "pipe:0",
-                "-vcodec", "libx264", "-pix_fmt", "yuv420p", mp4_path,
+                "-vcodec", "libx264", "-preset", "ultrafast", "-threads", "1", "-pix_fmt", "yuv420p", mp4_path,
             ],
             stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
@@ -284,7 +286,9 @@ def _process_video(
                     frame = cv2.addWeighted(frame, 1.0, neon, 1.0, 0)
                     frame = cv2.addWeighted(frame, 1.0, core, 1.0, 0)
                     frame = np.clip(frame, 0, 255).astype(np.uint8)
+                    del neon, core, glow
                 proc.stdin.write(frame.tobytes())
+                del frame
         finally:
             cap.release()
             proc.stdin.close()
