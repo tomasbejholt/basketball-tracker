@@ -170,7 +170,7 @@ def _process_video(
     try:
         try:
             result = subprocess.run(
-                ["ffmpeg", "-y", "-hwaccel", "none", "-i", input_path, "-vcodec", "libx264", "-pix_fmt", "yuv420p", conv_path],
+                ["ffmpeg", "-y", "-c:v", "libdav1d", "-i", input_path, "-vcodec", "libx264", "-pix_fmt", "yuv420p", conv_path],
                 check=True, capture_output=True,
             )
             _remove(input_path)
