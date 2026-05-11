@@ -176,14 +176,19 @@ async def track(
     with open(input_path, "wb") as f:
         f.write(await video.read())
 
-    # Transcode to H.264 so OpenCV can decode any codec (AV1, HEVC, MOV…)
-    await asyncio.to_thread(lambda: subprocess.run(
-        ["ffmpeg", "-y", "-i", input_path, "-vcodec", "libx264", "-pix_fmt", "yuv420p", "-an", conv_path],
-        check=True, capture_output=True,
-    ))
-    _remove(input_path)
+    # Try to transcode to H.264 for faster OpenCV decode (handles AV1, HEVC, MOV…)
+    try:
+        await asyncio.to_thread(lambda: subprocess.run(
+            ["ffmpeg", "-y", "-i", input_path, "-vcodec", "libx264", "-pix_fmt", "yuv420p", conv_path],
+            check=True, capture_output=True,
+        ))
+        _remove(input_path)
+        working_path = conv_path
+    except Exception:
+        _remove(conv_path)
+        working_path = input_path
 
-    cap = cv2.VideoCapture(conv_path)
+    cap = cv2.VideoCapture(working_path)
     fps          = cap.get(cv2.CAP_PROP_FPS) or 30
     w            = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     h            = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -196,7 +201,7 @@ async def track(
     base_bgr = hex_to_bgr(trail_color)
 
     raw_positions, raw_boxes = await asyncio.to_thread(
-        _run_inference, model, conv_path, conf, job_id
+        _run_inference, model, working_path, conf, job_id
     )
 
     if hasattr(model, "predictor") and model.predictor is not None:
@@ -210,7 +215,7 @@ async def track(
     positions = _smooth(positions, window=5)
 
     def _render_and_encode():
-        cap = cv2.VideoCapture(conv_path)
+        cap = cv2.VideoCapture(working_path)
         out = cv2.VideoWriter(avi_path, cv2.VideoWriter_fourcc(*"XVID"), fps, (w, h))
         trail: deque = deque(maxlen=trail_length)
 
@@ -262,7 +267,7 @@ async def track(
     if job_id and job_id in _progress:
         del _progress[job_id]
 
-    background_tasks.add_task(_remove, conv_path)
+    background_tasks.add_task(_remove, working_path)
     background_tasks.add_task(_remove, avi_path)
     background_tasks.add_task(_remove, mp4_path)
 
