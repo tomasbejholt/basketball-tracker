@@ -156,8 +156,8 @@ export default function ModelPage() {
             confidence threshold had a big impact: too low caused false positives
             on players&apos; feet, too high missed real detections.
           </p>
-          <p className="text-gray-400 italic">
-            [Your personal reflection here]
+          <p className="text-gray-400">
+            I didn&apos;t expect transfer learning to work this well on a small dataset. The model picked it up fast because it already knew what shapes and edges look like from being trained on millions of other images. The biggest surprise was that the dataset didn&apos;t have a train split at all, so I had to create one myself by splitting the data manually in code. I also learned that the confidence setting matters a lot. If it&apos;s too low the model starts detecting things that aren&apos;t the ball, if it&apos;s too high it misses the ball when things get messy. The thing that took the most time was actually building the app around the model. Training took 18 minutes but getting everything to work together as a real product took way longer than that.
           </p>
         </div>
       </Section>
