@@ -307,7 +307,7 @@ async def track(
 
 
 @app.get("/result/{job_id}")
-async def get_result(job_id: str, background_tasks: BackgroundTasks):
+async def get_result(job_id: str):
     if job_id not in _progress:
         raise HTTPException(status_code=404, detail="job not found")
     prog = _progress[job_id]
@@ -321,8 +321,14 @@ async def get_result(job_id: str, background_tasks: BackgroundTasks):
 
     mp4_path = _results.pop(job_id)
     del _progress[job_id]
-    background_tasks.add_task(_remove, mp4_path)
-    return FileResponse(mp4_path, media_type="video/mp4", filename="basketball_tracked.mp4")
+    with open(mp4_path, "rb") as f:
+        video_bytes = f.read()
+    _remove(mp4_path)
+    return Response(
+        content=video_bytes,
+        media_type="video/mp4",
+        headers={"Content-Disposition": "attachment; filename=basketball_tracked.mp4"},
+    )
 
 
 @app.get("/commentary")
