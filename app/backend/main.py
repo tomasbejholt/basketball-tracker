@@ -336,7 +336,7 @@ async def commentary(color_name: str = Query("neon green"), name: str = Query("f
             json={
                 "text": script,
                 "model_id": "eleven_multilingual_v2",
-                "voice_settings": {"stability": 0.5, "similarity_boost": 0.85},
+                "voice_settings": {"stability": 0.4, "similarity_boost": 0.85},
             },
             timeout=30.0,
         )
