@@ -7,9 +7,14 @@ RUN apt-get update && apt-get install -y \
     libsm6 \
     libxext6 \
     libxrender1 \
-    ffmpeg \
-    libavcodec-extra \
-    && rm -rf /var/lib/apt/lists/*
+    wget \
+    xz-utils \
+    && rm -rf /var/lib/apt/lists/* \
+    && wget -q "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz" -O /tmp/ff.tar.xz \
+    && tar xf /tmp/ff.tar.xz -C /tmp \
+    && mv /tmp/ffmpeg-*-amd64-static/ffmpeg /usr/local/bin/ffmpeg \
+    && mv /tmp/ffmpeg-*-amd64-static/ffprobe /usr/local/bin/ffprobe \
+    && rm -rf /tmp/ff.tar.xz /tmp/ffmpeg-*-amd64-static
 
 WORKDIR /app
 
