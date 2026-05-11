@@ -168,6 +168,16 @@ def _process_video(
 ) -> None:
     working_path = input_path
     try:
+        probe = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-select_streams", "v:0",
+             "-show_entries", "stream=codec_name",
+             "-of", "default=noprint_wrappers=1:nokey=1", input_path],
+            capture_output=True, text=True,
+        )
+        codec = probe.stdout.strip().lower()
+        if codec == "av1":
+            raise RuntimeError("AV1 video format is not supported. Please convert to MP4 (H.264) before uploading.")
+
         try:
             subprocess.run(
                 ["ffmpeg", "-y", "-hwaccel", "none", "-i", input_path, "-vcodec", "libx264", "-pix_fmt", "yuv420p", conv_path],
@@ -184,6 +194,9 @@ def _process_video(
         h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
         cap.release()
+
+        if w == 0 or h == 0:
+            raise RuntimeError("Could not decode video. Please use MP4 (H.264) format.")
 
         if job_id and job_id in _progress:
             _progress[job_id].update({"total": total_frames, "phase": "inference"})
