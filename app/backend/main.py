@@ -138,23 +138,32 @@ def _smooth(positions: list, window: int = 5) -> list:
 
 def _run_inference(model: YOLO, input_path: str, conf: float, job_id: str) -> tuple[list, list]:
     import torch
-    raw_positions: list = []
-    raw_boxes: list = []
+    vid_stride = 2
+    strided_positions: list = []
+    strided_boxes: list = []
     with torch.no_grad():
-        for frame_idx, result in enumerate(
-            model.track(source=input_path, persist=True, conf=conf, verbose=False, stream=True, imgsz=640)
+        for i, result in enumerate(
+            model.track(source=input_path, persist=True, conf=conf, verbose=False, stream=True, imgsz=640, vid_stride=vid_stride)
         ):
             if job_id and job_id in _progress:
-                _progress[job_id]["frame"] = frame_idx
+                _progress[job_id]["frame"] = i * vid_stride
             boxes = result.boxes
             if boxes is not None and len(boxes) > 0:
                 best = boxes[boxes.conf.argmax()]
                 x1, y1, x2, y2 = best.xyxy[0].cpu().numpy().astype(int)
-                raw_positions.append(((x1 + x2) // 2, (y1 + y2) // 2))
-                raw_boxes.append((x1, y1, x2, y2, float(best.conf)))
+                strided_positions.append(((x1 + x2) // 2, (y1 + y2) // 2))
+                strided_boxes.append((x1, y1, x2, y2, float(best.conf)))
             else:
-                raw_positions.append(None)
-                raw_boxes.append(None)
+                strided_positions.append(None)
+                strided_boxes.append(None)
+    # Expand strided results back to per-frame lists; interpolation fills the gaps
+    raw_positions: list = []
+    raw_boxes: list = []
+    for pos, box in zip(strided_positions, strided_boxes):
+        raw_positions.append(pos)
+        raw_positions.append(None)
+        raw_boxes.append(box)
+        raw_boxes.append(None)
     return raw_positions, raw_boxes
 
 
