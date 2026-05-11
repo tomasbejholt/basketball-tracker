@@ -169,14 +169,19 @@ def _process_video(
     working_path = input_path
     try:
         try:
-            subprocess.run(
+            result = subprocess.run(
                 ["ffmpeg", "-y", "-hwaccel", "none", "-i", input_path, "-vcodec", "libx264", "-pix_fmt", "yuv420p", conv_path],
                 check=True, capture_output=True,
             )
             _remove(input_path)
             working_path = conv_path
-        except Exception:
+            print(f"[ffmpeg] conversion OK → {conv_path}", flush=True)
+        except subprocess.CalledProcessError as e:
             _remove(conv_path)
+            print(f"[ffmpeg] conversion FAILED (exit {e.returncode}):\n{e.stderr.decode(errors='replace')[-800:]}", flush=True)
+        except Exception as e:
+            _remove(conv_path)
+            print(f"[ffmpeg] conversion ERROR: {e}", flush=True)
 
         cap = cv2.VideoCapture(working_path)
         fps = cap.get(cv2.CAP_PROP_FPS) or 30
