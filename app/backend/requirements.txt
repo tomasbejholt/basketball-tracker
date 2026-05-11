@@ -7,3 +7,4 @@ python-multipart
 httpx
 python-dotenv
 onnxruntime
+lap>=0.5.12

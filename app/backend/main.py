@@ -168,6 +168,8 @@ def _process_video(
     trail_length: int,
     trail_color: str,
 ) -> None:
+    import time as _time
+    t0 = _time.time()
     working_path = input_path
     try:
         try:
@@ -179,6 +181,7 @@ def _process_video(
             working_path = conv_path
         except Exception:
             _remove(conv_path)
+        print(f"[timing] pre-convert: {_time.time()-t0:.1f}s", flush=True)
 
         cap = cv2.VideoCapture(working_path)
         fps = cap.get(cv2.CAP_PROP_FPS) or 30
@@ -223,7 +226,9 @@ def _process_video(
                 _remove(scaled_path)
                 scale = 1.0
 
+        t1 = _time.time()
         raw_positions, raw_boxes = _run_inference(model, inference_path, conf, job_id)
+        print(f"[timing] inference ({len(raw_positions)} frames): {_time.time()-t1:.1f}s", flush=True)
 
         if inference_path != working_path:
             _remove(inference_path)
