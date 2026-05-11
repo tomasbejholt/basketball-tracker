@@ -17,7 +17,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-MODEL_PATH = os.path.join(os.path.dirname(__file__), "models", "best.pt")
+MODEL_PATH = os.path.join(os.path.dirname(__file__), "models", "best.onnx")
 
 
 @app.on_event("startup")
