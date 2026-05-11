@@ -1,7 +1,7 @@
 from fastapi import FastAPI, UploadFile, Form, BackgroundTasks, HTTPException, Query
 from fastapi.responses import FileResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
-import asyncio, tempfile, os, cv2, numpy as np, subprocess, uuid, httpx
+import tempfile, os, cv2, numpy as np, subprocess, uuid, httpx
 from collections import deque
 from ultralytics import YOLO
 from dotenv import load_dotenv
@@ -28,8 +28,9 @@ def cleanup_temp():
             os.unlink(f)
         except OSError:
             pass
-_model: YOLO | None = None
 
+
+_model: YOLO | None = None
 _progress: dict[str, dict] = {}
 
 ELEVENLABS_VOICE_ID = "DelQBHELqW1MekW91R0S"
@@ -99,7 +100,6 @@ def _remove(path: str) -> None:
 
 
 def _interpolate(positions: list, max_gap: int = 15) -> list:
-    """Fill short gaps in detections via linear interpolation."""
     result = list(positions)
     n = len(result)
     i = 0
@@ -124,7 +124,6 @@ def _interpolate(positions: list, max_gap: int = 15) -> list:
 
 
 def _smooth(positions: list, window: int = 5) -> list:
-    """Moving average smoothing to reduce jitter."""
     result = list(positions)
     half = window // 2
     n = len(result)
@@ -157,11 +156,136 @@ def _run_inference(model: YOLO, input_path: str, conf: float, job_id: str) -> tu
     return raw_positions, raw_boxes
 
 
+def _process_video(
+    model: YOLO,
+    job_id: str,
+    input_path: str,
+    conv_path: str,
+    mp4_path: str,
+    conf: float,
+    trail_length: int,
+    trail_color: str,
+) -> None:
+    working_path = input_path
+    try:
+        try:
+            subprocess.run(
+                ["ffmpeg", "-y", "-i", input_path, "-vcodec", "libx264", "-pix_fmt", "yuv420p", conv_path],
+                check=True, capture_output=True,
+            )
+            _remove(input_path)
+            working_path = conv_path
+        except Exception:
+            _remove(conv_path)
+
+        cap = cv2.VideoCapture(working_path)
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30
+        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
+        cap.release()
+
+        if job_id and job_id in _progress:
+            _progress[job_id].update({"total": total_frames, "phase": "inference"})
+
+        base_bgr = hex_to_bgr(trail_color)
+
+        raw_positions, raw_boxes = _run_inference(model, working_path, conf, job_id)
+
+        if hasattr(model, "predictor") and model.predictor is not None:
+            model.predictor = None
+
+        if job_id and job_id in _progress:
+            _progress[job_id]["frame"] = total_frames
+            _progress[job_id]["phase"] = "rendering"
+
+        positions = _interpolate(raw_positions, max_gap=max(1, int(fps / 2)))
+        positions = _smooth(positions, window=5)
+
+        proc = subprocess.Popen(
+            [
+                "ffmpeg", "-y",
+                "-f", "rawvideo", "-vcodec", "rawvideo",
+                "-s", f"{w}x{h}", "-pix_fmt", "bgr24", "-r", str(int(fps)),
+                "-i", "pipe:0",
+                "-vcodec", "libx264", "-pix_fmt", "yuv420p", mp4_path,
+            ],
+            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        cap = cv2.VideoCapture(working_path)
+        trail: deque = deque(maxlen=trail_length)
+        try:
+            for frame_idx, pos in enumerate(positions):
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                trail.append(pos)
+                box = raw_boxes[frame_idx] if frame_idx < len(raw_boxes) else None
+                if box is not None:
+                    x1, y1, x2, y2, conf_val = box
+                    cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+                    radius = max((x2 - x1), (y2 - y1)) // 2
+                    cv2.circle(frame, (cx, cy), radius, base_bgr, 2)
+                    cv2.putText(frame, f"{conf_val:.2f}", (x1, y1 - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.55, base_bgr, 2)
+                neon = np.zeros_like(frame)
+                core = np.zeros_like(frame)
+                bright_bgr = tuple(min(255, int(ch * 0.5 + 200)) for ch in base_bgr)
+                valid = [(p, i) for i, p in enumerate(trail) if p is not None]
+                for idx in range(len(valid) - 1):
+                    pos_a, i = valid[idx]
+                    pos_b, _ = valid[idx + 1]
+                    alpha = (i + 1) / trail_length
+                    cv2.line(neon, pos_a, pos_b, base_bgr, max(2, int(alpha * 8)))
+                    cv2.line(core, pos_a, pos_b, bright_bgr, max(1, int(alpha * 3)))
+                if valid:
+                    glow = cv2.GaussianBlur(neon, (21, 21), 0)
+                    frame = cv2.addWeighted(frame, 1.0, glow, 1.2, 0)
+                    frame = cv2.addWeighted(frame, 1.0, neon, 1.0, 0)
+                    frame = cv2.addWeighted(frame, 1.0, core, 1.0, 0)
+                    frame = np.clip(frame, 0, 255).astype(np.uint8)
+                proc.stdin.write(frame.tobytes())
+        finally:
+            cap.release()
+            proc.stdin.close()
+            proc.wait()
+
+        if proc.returncode != 0:
+            raise RuntimeError(f"ffmpeg pipe encoding failed with exit code {proc.returncode}")
+
+        _remove(working_path)
+
+        if job_id and job_id in _progress:
+            _progress[job_id]["status"] = "done"
+            _progress[job_id]["result_path"] = mp4_path
+
+    except Exception as e:
+        _remove(working_path)
+        _remove(mp4_path)
+        if job_id and job_id in _progress:
+            _progress[job_id]["status"] = "error"
+            _progress[job_id]["error"] = str(e)
+
+
 @app.get("/progress/{job_id}")
 def get_progress(job_id: str):
     if job_id not in _progress:
         raise HTTPException(status_code=404, detail="job not found")
     return _progress[job_id]
+
+
+@app.get("/result/{job_id}")
+def get_result(job_id: str, background_tasks: BackgroundTasks):
+    if job_id not in _progress:
+        raise HTTPException(status_code=404, detail="job not found")
+    job = _progress[job_id]
+    if job.get("status") != "done":
+        raise HTTPException(status_code=202, detail="not ready")
+    mp4_path = job.get("result_path")
+    if not mp4_path or not os.path.exists(mp4_path):
+        raise HTTPException(status_code=404, detail="result file missing")
+    del _progress[job_id]
+    background_tasks.add_task(_remove, mp4_path)
+    return FileResponse(mp4_path, media_type="video/mp4", filename="basketball_tracked.mp4")
 
 
 @app.post("/track")
@@ -185,114 +309,15 @@ async def track(
     with open(input_path, "wb") as f:
         f.write(await video.read())
 
-    # Try to transcode to H.264 for faster OpenCV decode (handles AV1, HEVC, MOV…)
-    try:
-        await asyncio.to_thread(lambda: subprocess.run(
-            ["ffmpeg", "-y", "-i", input_path, "-vcodec", "libx264", "-pix_fmt", "yuv420p", conv_path],
-            check=True, capture_output=True,
-        ))
-        _remove(input_path)
-        working_path = conv_path
-    except Exception:
-        _remove(conv_path)
-        working_path = input_path
-
-    cap = cv2.VideoCapture(working_path)
-    fps          = cap.get(cv2.CAP_PROP_FPS) or 30
-    w            = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    h            = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
-    cap.release()
-
     if job_id:
-        _progress[job_id] = {"frame": 0, "total": total_frames, "phase": "inference"}
+        _progress[job_id] = {"frame": 0, "total": 0, "phase": "queued", "status": "processing"}
 
-    base_bgr = hex_to_bgr(trail_color)
-
-    raw_positions, raw_boxes = await asyncio.to_thread(
-        _run_inference, model, working_path, conf, job_id
+    background_tasks.add_task(
+        _process_video,
+        model, job_id, input_path, conv_path, mp4_path, conf, trail_length, trail_color,
     )
 
-    if hasattr(model, "predictor") and model.predictor is not None:
-        model.predictor = None
-
-    if job_id and job_id in _progress:
-        _progress[job_id]["frame"] = total_frames
-        _progress[job_id]["phase"] = "rendering"
-
-    positions = _interpolate(raw_positions, max_gap=max(1, int(fps / 2)))
-    positions = _smooth(positions, window=5)
-
-    def _render_and_encode():
-        proc = subprocess.Popen(
-            [
-                "ffmpeg", "-y",
-                "-f", "rawvideo", "-vcodec", "rawvideo",
-                "-s", f"{w}x{h}", "-pix_fmt", "bgr24", "-r", str(int(fps)),
-                "-i", "pipe:0",
-                "-vcodec", "libx264", "-pix_fmt", "yuv420p", mp4_path,
-            ],
-            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-        cap = cv2.VideoCapture(working_path)
-        trail: deque = deque(maxlen=trail_length)
-        try:
-            for frame_idx, pos in enumerate(positions):
-                ret, frame = cap.read()
-                if not ret:
-                    break
-
-                trail.append(pos)
-                box = raw_boxes[frame_idx] if frame_idx < len(raw_boxes) else None
-
-                if box is not None:
-                    x1, y1, x2, y2, c = box
-                    cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
-                    radius = max((x2 - x1), (y2 - y1)) // 2
-                    cv2.circle(frame, (cx, cy), radius, base_bgr, 2)
-                    cv2.putText(frame, f"{c:.2f}", (x1, y1 - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.55, base_bgr, 2)
-
-                neon = np.zeros_like(frame)
-                core = np.zeros_like(frame)
-                bright_bgr = tuple(min(255, int(c * 0.5 + 200)) for c in base_bgr)
-
-                valid = [(p, i) for i, p in enumerate(trail) if p is not None]
-                for idx in range(len(valid) - 1):
-                    pos_a, i = valid[idx]
-                    pos_b, _ = valid[idx + 1]
-                    alpha = (i + 1) / trail_length
-                    cv2.line(neon, pos_a, pos_b, base_bgr, max(2, int(alpha * 8)))
-                    cv2.line(core, pos_a, pos_b, bright_bgr, max(1, int(alpha * 3)))
-
-                if valid:
-                    glow = cv2.GaussianBlur(neon, (21, 21), 0)
-                    frame = cv2.addWeighted(frame, 1.0, glow, 1.2, 0)
-                    frame = cv2.addWeighted(frame, 1.0, neon, 1.0, 0)
-                    frame = cv2.addWeighted(frame, 1.0, core, 1.0, 0)
-                    frame = np.clip(frame, 0, 255).astype(np.uint8)
-
-                proc.stdin.write(frame.tobytes())
-        finally:
-            cap.release()
-            proc.stdin.close()
-            proc.wait()
-        if proc.returncode != 0:
-            raise RuntimeError(f"ffmpeg pipe encoding failed with exit code {proc.returncode}")
-
-    try:
-        await asyncio.to_thread(_render_and_encode)
-    except Exception:
-        _remove(working_path)
-        _remove(mp4_path)
-        raise
-
-    if job_id and job_id in _progress:
-        del _progress[job_id]
-
-    background_tasks.add_task(_remove, working_path)
-    background_tasks.add_task(_remove, mp4_path)
-
-    return FileResponse(mp4_path, media_type="video/mp4", filename="basketball_tracked.mp4")
+    return {"status": "accepted", "job_id": job_id}
 
 
 @app.get("/commentary")
