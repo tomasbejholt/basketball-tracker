@@ -4,7 +4,7 @@ import { useRouter } from "next/navigation";
 import { useState } from "react";
 
 const VIDEOS = [
-  { label: "Game Clip 1", src: "/video_1.mp4" },
+  { label: "Game Clip 1", src: "/video_1.mp4", badge: "Best visual" },
   { label: "Game Clip 2", src: "/video_2.mp4" },
   { label: "Game Clip 3", src: "/video_3.mp4" },
 ];
@@ -76,6 +76,11 @@ export default function LibraryPage() {
               className="bg-gray-900/60 border border-gray-800 rounded-2xl overflow-hidden group hover:border-orange-500/40 transition-all duration-200"
             >
               <div className="relative aspect-video bg-gray-900 flex items-center justify-center">
+                {v.badge && (
+                  <div className="absolute top-2 left-2 z-10 bg-orange-500 text-white text-xs font-bold px-2.5 py-1 rounded-full shadow-lg">
+                    {v.badge}
+                  </div>
+                )}
                 <video
                   src={v.src}
                   className="w-full h-full object-cover"
