@@ -130,10 +130,19 @@ export default function TrackerPage() {
       }
 
       await new Promise<void>((resolve, reject) => {
+        let misses = 0;
         pollRef.current = setInterval(async () => {
           try {
             const res = await fetch(`${API_URL}/progress/${jobId}`);
-            if (!res.ok) return;
+            if (!res.ok) {
+              if (++misses >= 6) {
+                clearInterval(pollRef.current!);
+                pollRef.current = null;
+                reject(new Error("Server restarted during processing. Please try again."));
+              }
+              return;
+            }
+            misses = 0;
             const data = await res.json();
             setInferenceProgress(data);
             if (data.status === "done") {

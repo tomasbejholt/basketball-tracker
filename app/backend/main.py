@@ -197,6 +197,7 @@ def _process_video(
 
         if hasattr(model, "predictor") and model.predictor is not None:
             model.predictor = None
+        import gc; gc.collect()
 
         if job_id and job_id in _progress:
             _progress[job_id]["frame"] = total_frames
