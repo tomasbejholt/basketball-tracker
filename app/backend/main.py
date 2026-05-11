@@ -1,7 +1,7 @@
 from fastapi import FastAPI, UploadFile, Form, BackgroundTasks, HTTPException, Query
 from fastapi.responses import FileResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
-import asyncio, tempfile, os, cv2, numpy as np, subprocess, uuid, httpx
+import asyncio, tempfile, os, cv2, numpy as np, subprocess, uuid, httpx, threading
 from collections import deque
 from ultralytics import YOLO
 from dotenv import load_dotenv
@@ -21,6 +21,7 @@ MODEL_PATH = os.path.join(os.path.dirname(__file__), "models", "best.pt")
 _model: YOLO | None = None
 
 _progress: dict[str, dict] = {}
+_results: dict[str, str] = {}
 
 ELEVENLABS_VOICE_ID = "DelQBHELqW1MekW91R0S"
 
@@ -147,6 +148,118 @@ def _run_inference(model: YOLO, input_path: str, conf: float, job_id: str) -> tu
     return raw_positions, raw_boxes
 
 
+def _render_and_encode(
+    input_path: str, avi_path: str, mp4_path: str,
+    positions: list, raw_boxes: list,
+    base_bgr: tuple, fps: float, w: int, h: int, trail_length: int,
+) -> None:
+    cap = cv2.VideoCapture(input_path)
+    out = cv2.VideoWriter(avi_path, cv2.VideoWriter_fourcc(*"XVID"), fps, (w, h))
+    trail: deque = deque(maxlen=trail_length)
+
+    for frame_idx, pos in enumerate(positions):
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        trail.append(pos)
+        box = raw_boxes[frame_idx] if frame_idx < len(raw_boxes) else None
+
+        if box is not None:
+            x1, y1, x2, y2, c = box
+            cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+            radius = max((x2 - x1), (y2 - y1)) // 2
+            cv2.circle(frame, (cx, cy), radius, base_bgr, 2)
+            cv2.putText(frame, f"{c:.2f}", (x1, y1 - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.55, base_bgr, 2)
+
+        neon = np.zeros_like(frame)
+        core = np.zeros_like(frame)
+        bright_bgr = tuple(min(255, int(c * 0.5 + 200)) for c in base_bgr)
+
+        valid = [(p, i) for i, p in enumerate(trail) if p is not None]
+        for idx in range(len(valid) - 1):
+            pos_a, i = valid[idx]
+            pos_b, _ = valid[idx + 1]
+            alpha = (i + 1) / trail_length
+            cv2.line(neon, pos_a, pos_b, base_bgr, max(2, int(alpha * 8)))
+            cv2.line(core, pos_a, pos_b, bright_bgr, max(1, int(alpha * 3)))
+
+        if valid:
+            glow = cv2.GaussianBlur(neon, (21, 21), 0)
+            frame = cv2.addWeighted(frame, 1.0, glow, 1.2, 0)
+            frame = cv2.addWeighted(frame, 1.0, neon, 1.0, 0)
+            frame = cv2.addWeighted(frame, 1.0, core, 1.0, 0)
+            frame = np.clip(frame, 0, 255).astype(np.uint8)
+
+        out.write(frame)
+
+    cap.release()
+    out.release()
+    subprocess.run(
+        ["ffmpeg", "-y", "-i", avi_path, "-vcodec", "libx264", "-pix_fmt", "yuv420p", mp4_path],
+        check=True,
+        capture_output=True,
+    )
+
+
+def _process_video_bg(
+    job_id: str, input_path: str, conf: float, trail_length: int,
+    base_bgr: tuple, fps: float, w: int, h: int, total_frames: int, uid: str,
+) -> None:
+    tmp = tempfile.gettempdir()
+    conv_path = os.path.join(tmp, f"bt_conv_{uid}.mp4")
+    avi_path = os.path.join(tmp, f"bt_out_{uid}.avi")
+    mp4_path = os.path.join(tmp, f"bt_out_{uid}.mp4")
+    try:
+        # Transcode to H.264 first — handles AV1/HEVC/MOV and speeds up OpenCV decode
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", input_path, "-vcodec", "libx264", "-pix_fmt", "yuv420p", "-an", conv_path],
+            check=True, capture_output=True,
+        )
+        _remove(input_path)
+
+        cap2 = cv2.VideoCapture(conv_path)
+        fps = cap2.get(cv2.CAP_PROP_FPS) or fps
+        w = int(cap2.get(cv2.CAP_PROP_FRAME_WIDTH))
+        h = int(cap2.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        total_frames = int(cap2.get(cv2.CAP_PROP_FRAME_COUNT)) or total_frames
+        cap2.release()
+
+        if job_id in _progress:
+            _progress[job_id]["total"] = total_frames
+
+        model = get_model()
+        raw_positions, raw_boxes = _run_inference(model, conv_path, conf, job_id)
+
+        if hasattr(model, "predictor") and model.predictor is not None:
+            model.predictor = None
+
+        if job_id in _progress:
+            _progress[job_id]["frame"] = total_frames
+            _progress[job_id]["phase"] = "rendering"
+
+        positions = _interpolate(raw_positions, max_gap=max(1, int(fps / 2)))
+        positions = _smooth(positions, window=5)
+
+        _render_and_encode(conv_path, avi_path, mp4_path, positions, raw_boxes,
+                           base_bgr, fps, w, h, trail_length)
+
+        _remove(conv_path)
+        _remove(avi_path)
+
+        _results[job_id] = mp4_path
+        if job_id in _progress:
+            _progress[job_id]["phase"] = "done"
+            _progress[job_id]["status"] = "done"
+    except Exception as e:
+        _remove(input_path)
+        _remove(conv_path)
+        _remove(avi_path)
+        if job_id in _progress:
+            _progress[job_id]["status"] = "error"
+            _progress[job_id]["error"] = str(e)
+
+
 @app.get("/progress/{job_id}")
 def get_progress(job_id: str):
     if job_id not in _progress:
@@ -156,21 +269,16 @@ def get_progress(job_id: str):
 
 @app.post("/track")
 async def track(
-    background_tasks: BackgroundTasks,
     video: UploadFile,
     conf: float = Form(0.3),
     trail_length: int = Form(30),
     trail_color: str = Form("#00FF88"),
     job_id: str = Form(""),
 ):
-    model = get_model()
     uid = uuid.uuid4().hex
     suffix = os.path.splitext(video.filename or "video.mp4")[1] or ".mp4"
     tmp = tempfile.gettempdir()
-
     input_path = os.path.join(tmp, f"bt_in_{uid}{suffix}")
-    avi_path = os.path.join(tmp, f"bt_out_{uid}.avi")
-    mp4_path = os.path.join(tmp, f"bt_out_{uid}.mp4")
 
     with open(input_path, "wb") as f:
         f.write(await video.read())
@@ -182,83 +290,38 @@ async def track(
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
     cap.release()
 
-    if job_id:
-        _progress[job_id] = {"frame": 0, "total": total_frames, "phase": "inference"}
-
+    effective_job_id = job_id or uid
     base_bgr = hex_to_bgr(trail_color)
 
-    raw_positions, raw_boxes = await asyncio.to_thread(
-        _run_inference, model, input_path, conf, job_id
-    )
+    _progress[effective_job_id] = {
+        "frame": 0, "total": total_frames, "phase": "inference", "status": "processing"
+    }
 
-    if hasattr(model, "predictor") and model.predictor is not None:
-        model.predictor = None
+    threading.Thread(
+        target=_process_video_bg,
+        args=(effective_job_id, input_path, conf, trail_length, base_bgr, fps, w, h, total_frames, uid),
+        daemon=True,
+    ).start()
 
-    if job_id and job_id in _progress:
-        _progress[job_id]["frame"] = total_frames
-        _progress[job_id]["phase"] = "rendering"
+    return {"job_id": effective_job_id}
 
-    positions = _interpolate(raw_positions, max_gap=max(1, int(fps / 2)))
-    positions = _smooth(positions, window=5)
 
-    def _render_and_encode():
-        cap = cv2.VideoCapture(input_path)
-        out = cv2.VideoWriter(avi_path, cv2.VideoWriter_fourcc(*"XVID"), fps, (w, h))
-        trail: deque = deque(maxlen=trail_length)
-
-        for frame_idx, pos in enumerate(positions):
-            ret, frame = cap.read()
-            if not ret:
-                break
-
-            trail.append(pos)
-            box = raw_boxes[frame_idx] if frame_idx < len(raw_boxes) else None
-
-            if box is not None:
-                x1, y1, x2, y2, c = box
-                cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
-                radius = max((x2 - x1), (y2 - y1)) // 2
-                cv2.circle(frame, (cx, cy), radius, base_bgr, 2)
-                cv2.putText(frame, f"{c:.2f}", (x1, y1 - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.55, base_bgr, 2)
-
-            neon = np.zeros_like(frame)
-            core = np.zeros_like(frame)
-            bright_bgr = tuple(min(255, int(c * 0.5 + 200)) for c in base_bgr)
-
-            valid = [(p, i) for i, p in enumerate(trail) if p is not None]
-            for idx in range(len(valid) - 1):
-                pos_a, i = valid[idx]
-                pos_b, _ = valid[idx + 1]
-                alpha = (i + 1) / trail_length
-                cv2.line(neon, pos_a, pos_b, base_bgr, max(2, int(alpha * 8)))
-                cv2.line(core, pos_a, pos_b, bright_bgr, max(1, int(alpha * 3)))
-
-            if valid:
-                glow = cv2.GaussianBlur(neon, (21, 21), 0)
-                frame = cv2.addWeighted(frame, 1.0, glow, 1.2, 0)
-                frame = cv2.addWeighted(frame, 1.0, neon, 1.0, 0)
-                frame = cv2.addWeighted(frame, 1.0, core, 1.0, 0)
-                frame = np.clip(frame, 0, 255).astype(np.uint8)
-
-            out.write(frame)
-
-        cap.release()
-        out.release()
-        subprocess.run(
-            ["ffmpeg", "-y", "-i", avi_path, "-vcodec", "libx264", "-pix_fmt", "yuv420p", mp4_path],
-            check=True,
-            capture_output=True,
-        )
-
-    await asyncio.to_thread(_render_and_encode)
-
-    if job_id and job_id in _progress:
+@app.get("/result/{job_id}")
+async def get_result(job_id: str, background_tasks: BackgroundTasks):
+    if job_id not in _progress:
+        raise HTTPException(status_code=404, detail="job not found")
+    prog = _progress[job_id]
+    if prog.get("status") == "error":
         del _progress[job_id]
+        raise HTTPException(status_code=500, detail=prog.get("error", "processing failed"))
+    if prog.get("status") != "done":
+        raise HTTPException(status_code=425, detail="still processing")
+    if job_id not in _results:
+        raise HTTPException(status_code=404, detail="result not found")
 
-    background_tasks.add_task(_remove, input_path)
-    background_tasks.add_task(_remove, avi_path)
+    mp4_path = _results.pop(job_id)
+    del _progress[job_id]
     background_tasks.add_task(_remove, mp4_path)
-
     return FileResponse(mp4_path, media_type="video/mp4", filename="basketball_tracked.mp4")
 
 
