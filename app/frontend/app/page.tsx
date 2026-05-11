@@ -115,6 +115,17 @@ export default function TrackerPage() {
     const jobId = crypto.randomUUID();
     jobIdRef.current = jobId;
 
+    pollRef.current = setInterval(async () => {
+      try {
+        const res = await fetch(`${API_URL}/progress/${jobId}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        setInferenceProgress(data);
+      } catch {
+        // polling is best-effort
+      }
+    }, 500);
+
     const fd = new FormData();
     fd.append("video", file);
     fd.append("conf", conf.toFixed(2));
@@ -123,38 +134,7 @@ export default function TrackerPage() {
     fd.append("job_id", jobId);
 
     try {
-      // Submit job — backend returns immediately, processing runs in background
-      const submitRes = await fetch(`${API_URL}/track`, { method: "POST", body: fd });
-      if (!submitRes.ok) {
-        const text = await submitRes.text();
-        throw new Error(`Server error ${submitRes.status}: ${text}`);
-      }
-
-      // Poll /progress until status is "done" or "error"
-      await new Promise<void>((resolve, reject) => {
-        pollRef.current = setInterval(async () => {
-          try {
-            const res = await fetch(`${API_URL}/progress/${jobId}`);
-            if (!res.ok) return;
-            const data = await res.json();
-            setInferenceProgress(data);
-            if (data.status === "done") {
-              clearInterval(pollRef.current!);
-              pollRef.current = null;
-              resolve();
-            } else if (data.status === "error") {
-              clearInterval(pollRef.current!);
-              pollRef.current = null;
-              reject(new Error(data.error || "Processing failed"));
-            }
-          } catch {
-            // polling is best-effort
-          }
-        }, 500);
-      });
-
-      // Fetch the finished video
-      const res = await fetch(`${API_URL}/result/${jobId}`);
+      const res = await fetch(`${API_URL}/track`, { method: "POST", body: fd });
       if (!res.ok) {
         const text = await res.text();
         throw new Error(`Server error ${res.status}: ${text}`);
