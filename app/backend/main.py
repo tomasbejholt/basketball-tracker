@@ -180,7 +180,6 @@ async def track(
 
     input_path = os.path.join(tmp, f"bt_in_{uid}{suffix}")
     conv_path  = os.path.join(tmp, f"bt_conv_{uid}.mp4")
-    avi_path   = os.path.join(tmp, f"bt_out_{uid}.avi")
     mp4_path   = os.path.join(tmp, f"bt_out_{uid}.mp4")
 
     with open(input_path, "wb") as f:
@@ -225,58 +224,65 @@ async def track(
     positions = _smooth(positions, window=5)
 
     def _render_and_encode():
-        cap = cv2.VideoCapture(working_path)
-        out = cv2.VideoWriter(avi_path, cv2.VideoWriter_fourcc(*"XVID"), fps, (w, h))
-        trail: deque = deque(maxlen=trail_length)
-
-        for frame_idx, pos in enumerate(positions):
-            ret, frame = cap.read()
-            if not ret:
-                break
-
-            trail.append(pos)
-            box = raw_boxes[frame_idx] if frame_idx < len(raw_boxes) else None
-
-            if box is not None:
-                x1, y1, x2, y2, c = box
-                cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
-                radius = max((x2 - x1), (y2 - y1)) // 2
-                cv2.circle(frame, (cx, cy), radius, base_bgr, 2)
-                cv2.putText(frame, f"{c:.2f}", (x1, y1 - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.55, base_bgr, 2)
-
-            neon = np.zeros_like(frame)
-            core = np.zeros_like(frame)
-            bright_bgr = tuple(min(255, int(c * 0.5 + 200)) for c in base_bgr)
-
-            valid = [(p, i) for i, p in enumerate(trail) if p is not None]
-            for idx in range(len(valid) - 1):
-                pos_a, i = valid[idx]
-                pos_b, _ = valid[idx + 1]
-                alpha = (i + 1) / trail_length
-                cv2.line(neon, pos_a, pos_b, base_bgr, max(2, int(alpha * 8)))
-                cv2.line(core, pos_a, pos_b, bright_bgr, max(1, int(alpha * 3)))
-
-            if valid:
-                glow = cv2.GaussianBlur(neon, (21, 21), 0)
-                frame = cv2.addWeighted(frame, 1.0, glow, 1.2, 0)
-                frame = cv2.addWeighted(frame, 1.0, neon, 1.0, 0)
-                frame = cv2.addWeighted(frame, 1.0, core, 1.0, 0)
-                frame = np.clip(frame, 0, 255).astype(np.uint8)
-
-            out.write(frame)
-
-        cap.release()
-        out.release()
-        subprocess.run(
-            ["ffmpeg", "-y", "-i", avi_path, "-vcodec", "libx264", "-pix_fmt", "yuv420p", mp4_path],
-            check=True, capture_output=True,
+        proc = subprocess.Popen(
+            [
+                "ffmpeg", "-y",
+                "-f", "rawvideo", "-vcodec", "rawvideo",
+                "-s", f"{w}x{h}", "-pix_fmt", "bgr24", "-r", str(int(fps)),
+                "-i", "pipe:0",
+                "-vcodec", "libx264", "-pix_fmt", "yuv420p", mp4_path,
+            ],
+            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
+        cap = cv2.VideoCapture(working_path)
+        trail: deque = deque(maxlen=trail_length)
+        try:
+            for frame_idx, pos in enumerate(positions):
+                ret, frame = cap.read()
+                if not ret:
+                    break
+
+                trail.append(pos)
+                box = raw_boxes[frame_idx] if frame_idx < len(raw_boxes) else None
+
+                if box is not None:
+                    x1, y1, x2, y2, c = box
+                    cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+                    radius = max((x2 - x1), (y2 - y1)) // 2
+                    cv2.circle(frame, (cx, cy), radius, base_bgr, 2)
+                    cv2.putText(frame, f"{c:.2f}", (x1, y1 - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.55, base_bgr, 2)
+
+                neon = np.zeros_like(frame)
+                core = np.zeros_like(frame)
+                bright_bgr = tuple(min(255, int(c * 0.5 + 200)) for c in base_bgr)
+
+                valid = [(p, i) for i, p in enumerate(trail) if p is not None]
+                for idx in range(len(valid) - 1):
+                    pos_a, i = valid[idx]
+                    pos_b, _ = valid[idx + 1]
+                    alpha = (i + 1) / trail_length
+                    cv2.line(neon, pos_a, pos_b, base_bgr, max(2, int(alpha * 8)))
+                    cv2.line(core, pos_a, pos_b, bright_bgr, max(1, int(alpha * 3)))
+
+                if valid:
+                    glow = cv2.GaussianBlur(neon, (21, 21), 0)
+                    frame = cv2.addWeighted(frame, 1.0, glow, 1.2, 0)
+                    frame = cv2.addWeighted(frame, 1.0, neon, 1.0, 0)
+                    frame = cv2.addWeighted(frame, 1.0, core, 1.0, 0)
+                    frame = np.clip(frame, 0, 255).astype(np.uint8)
+
+                proc.stdin.write(frame.tobytes())
+        finally:
+            cap.release()
+            proc.stdin.close()
+            proc.wait()
+        if proc.returncode != 0:
+            raise RuntimeError(f"ffmpeg pipe encoding failed with exit code {proc.returncode}")
 
     try:
         await asyncio.to_thread(_render_and_encode)
     except Exception:
         _remove(working_path)
-        _remove(avi_path)
         _remove(mp4_path)
         raise
 
@@ -284,7 +290,6 @@ async def track(
         del _progress[job_id]
 
     background_tasks.add_task(_remove, working_path)
-    background_tasks.add_task(_remove, avi_path)
     background_tasks.add_task(_remove, mp4_path)
 
     return FileResponse(mp4_path, media_type="video/mp4", filename="basketball_tracked.mp4")
