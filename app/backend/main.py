@@ -142,7 +142,7 @@ def _run_inference(model: YOLO, input_path: str, conf: float, job_id: str) -> tu
     raw_boxes: list = []
     with torch.no_grad():
         for frame_idx, result in enumerate(
-            model.track(source=input_path, persist=True, conf=conf, verbose=False, stream=True, imgsz=320)
+            model.track(source=input_path, persist=True, conf=conf, verbose=False, stream=True, imgsz=640)
         ):
             if job_id and job_id in _progress:
                 _progress[job_id]["frame"] = frame_idx
