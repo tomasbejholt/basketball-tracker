@@ -308,7 +308,7 @@ async def get_result(job_id: str, background_tasks: BackgroundTasks):
 
 @app.get("/commentary")
 async def commentary(color_name: str = Query("neon green"), name: str = Query("friend")):
-    api_key = os.environ.get("ELEVENLABS_API_KEY", "")
+    api_key = os.environ.get("ELEVENLABS_API_KEY", "").strip()
     if not api_key:
         raise HTTPException(status_code=503, detail="ELEVENLABS_API_KEY not configured")
 
