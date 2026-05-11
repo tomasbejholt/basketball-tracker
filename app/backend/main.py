@@ -193,7 +193,32 @@ def _process_video(
 
         base_bgr = hex_to_bgr(trail_color)
 
-        raw_positions, raw_boxes = _run_inference(model, working_path, conf, job_id)
+        # Scale down for inference to reduce memory usage; render at original resolution
+        scale = 1.0
+        inference_path = working_path
+        scaled_path = os.path.join(tempfile.gettempdir(), f"bt_scaled_{os.path.basename(mp4_path)}")
+        if w > 640:
+            scale = 640.0 / w
+            try:
+                subprocess.run(
+                    ["ffmpeg", "-y", "-i", working_path, "-vf", "scale=640:-2", "-vcodec", "libx264", "-pix_fmt", "yuv420p", scaled_path],
+                    check=True, capture_output=True,
+                )
+                inference_path = scaled_path
+            except Exception:
+                _remove(scaled_path)
+                scale = 1.0
+
+        raw_positions, raw_boxes = _run_inference(model, inference_path, conf, job_id)
+
+        if inference_path != working_path:
+            _remove(inference_path)
+
+        if scale != 1.0:
+            raw_positions = [(int(x / scale), int(y / scale)) if p is not None else None for p, x, y in
+                             [(p, p[0], p[1]) if p is not None else (None, 0, 0) for p in raw_positions]]
+            raw_boxes = [(int(b[0]/scale), int(b[1]/scale), int(b[2]/scale), int(b[3]/scale), b[4])
+                         if b is not None else None for b in raw_boxes]
 
         if hasattr(model, "predictor") and model.predictor is not None:
             model.predictor = None
