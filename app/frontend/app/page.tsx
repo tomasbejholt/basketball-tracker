@@ -51,6 +51,11 @@ export default function TrackerPage() {
     setError(null);
   };
 
+  // Wake the backend (Railway serverless) while the user picks a video
+  useEffect(() => {
+    fetch(`${API_URL}/health`).catch(() => {});
+  }, []);
+
   // Load preset video from library (?video=/video_1.mp4)
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
